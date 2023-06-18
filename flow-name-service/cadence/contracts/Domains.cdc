@@ -242,5 +242,30 @@ pub contract Domains: NonFungibleToken{
 
             destroy oldToken
         }
+
+        pub fun getIds(): [UInt64]{
+            // in a dictionary if only keys then it is a set
+
+            return self.ownedNFTs.keys
+        }
+        
+        pub fun borrowNFT(id: UInt64): &NonFungibleToken.NFT{
+            return (&self.ownedNFTs[id] as &NonFungibleToken.NFT?)!
+        }
+
+        pub fun borrowDomain(id: UInt64): &{Domains.DomainPublic}{
+            pre{
+                self.ownedNFTs[id] != nil : "Domain does not exists" 
+            }
+
+            let token = (&self.ownedNFTs[id] as auth &NonFungibleToken.NFT?)!
+
+            // type assesrtion operator, to explicitly convert a value to a specified type
+            // if the cast fails at runtime, due to incompatible types, it will give runtime error
+            return token as! &Domains.NFT
+        }
+
+        // Domains.CollectionPrivate
+        
     }
 }
