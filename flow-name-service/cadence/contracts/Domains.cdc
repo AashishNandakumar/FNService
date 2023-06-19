@@ -7,14 +7,26 @@ import FlowToken from "./tokens/FlowToken.cdc"
 // "Domains" will implements contract interface "NonFungibleToken"
 pub contract Domains: NonFungibleToken{
 
-    // global variables aka dictionaries
+    // GLOBAL VARIABLES
+    // hashname to address
     pub let owners: {String: Address}
+    // hashname to string
     pub let expirationTimes: {String: UFix64}
+    // A mapping for domain nameHash -> domain ID
+    pub let nameHashToIDs: {String: UInt64}
+    // counter to keep the no of domains minted
+    pub var totalSupply: UInt64
+    // define the list of characters which are forbidden to use in a domain name
+    pub let forbiddenChars: String
+    // duration for which the domain will be rented
+    pub let minRentDuration: UFix64
+    // define the maximum length of the domain name 
+    pub let maxDomainLength: Int
 
-    // global fxns
+    // GLOBAL FUNCTIONS
     // HELPER functions
     // check if the domain is available for sale
-    pub fun isAvaiable(nameHash: String): Bool{
+    pub fun isAvailable(nameHash: String): Bool{
         if(self.owners[nameHash]==nil){
             return true
         }
@@ -58,9 +70,22 @@ pub contract Domains: NonFungibleToken{
         self.expirationTimes[nameHash] = expTime
     }
 
-    // BEGIN:
+    pub fun getAllNameHashToIds(): {String: UInt64}{
+        return self.nameHashToIDs
+    }
+
+    access(account) fun updateNameHashToID(namehash: String, id: Uint64){
+        self.nameHashToIDs[namehash] = id
+    }
+
+
+    // EVENTS
     pub event DomainBioChanged(nameHash: String, bio: String)
     pub event DomainAddressChanged(nameHash: String, address: Address)
+    pub event DomainMinted(id: UInt64, name: String, nameHash: String, expiresAt: UFix64, receiver: Address)
+    pub event DomainRenewed(id: UInt64, name: String, nameHash: String, expiresAt: UFix64, receiver: Address)
+
+    // BEGIN:
 
     // struct to represent information about the FNS Domain
     pub struct DomainInfo{
@@ -265,7 +290,69 @@ pub contract Domains: NonFungibleToken{
             return token as! &Domains.NFT
         }
 
-        // Domains.CollectionPrivate
-        
+        access(account) fun mintDomain(name: String, nameHash: String, expiresAt: UFix64, receiver: Capability<&{NonFungibleToken.Receiver}>){
+            pre{
+                Domains.isAvailable(nameHash: nameHash) : "Domain not available"
+            }
+
+            // "create" a resource
+            let domain <- create Domain.NFT(
+                    id: Domains.totalSupply, 
+                    name: name, 
+                    nameHash: nameHash
+                )
+
+            Domains.updateOwner(nameHash: nameHash, address: receiver.address)
+            Domains.updateExpirationTime(nameHash: nameHash, expTime: expiresAt)
+
+            Domains.updateNameHashToID(namehash: nameHash, id: domain.id)
+            Domains.totalSupply = Domains.totalSupply + 1
+
+            emit DomainMinted(id: domain.id, name: name, nameHash: nameHash, expiresAt: expiresAt, receiver: receiver.address)
+
+
+            receiver.borrow()!.deposit(token: <- domain)
+        }
+
+        pub fun borrowDomainPrivate(id: UInt64): &Domains.NFT {
+            pre{
+                self.ownedNFTs[id] != nil: "Domain does not exist"
+            }
+
+            let ref = (&self.ownedNFTs[id] as auth &NonFungibleToken.NFT?)!
+
+            return ref as! &Domains.NFT
+        }
+
+        // identical to destructor, destroys the resources!!
+        destroy(){
+            destroy self.ownedNFTs
+        }
     }
-}
+
+    //* REGISTRAR RESOURCE */
+    // interfaces provide Seperation of Concerns
+
+    //* PUBLIC REGISTRAR INTERFACE */
+    pub resource interface RegistrarPublic{
+        // Unsigned fixed-point decimal type
+        pub let minRentDuration: UFix64
+        pub let maxDomainLength: Int
+        // mapping: length of domain -> price of Domain
+        pub let prices: {Int: UFix64}
+
+        pub fun renewDomain(domain: &Domains.NFT, duration: UFix64, feeTokens: @FungibleToken.Vault)
+        pub fun registerDomain(name: String, duration: UFix64, feeTokens: @FungibleToken.Vault, receiver: Capability<&{NonFungibleToken.Receiver}>)
+        // returns the prices dictionary
+        pub fun getPrices(): {Int : UFix64}
+        pub fun getVaultBalance(): UFix64
+    }
+
+    //* PRIVATE REGISTRAR INTERFACE */
+    pub resource interface RegistrarPrivate{
+        pub fun updateRentVault(vault: @FungibleToken.Vault)
+        pub fun withdrawVault(receiver: Capability<&{FungibleToken.Receiver}>, amount: UFix64)
+        pub fun setPrices(key: Int, val: UFix64)
+    }
+
+}   
