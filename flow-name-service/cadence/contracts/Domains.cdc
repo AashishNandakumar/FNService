@@ -77,7 +77,7 @@ pub contract Domains: NonFungibleToken{
     access(account) fun updateNameHashToID(namehash: String, id: Uint64){
         self.nameHashToIDs[namehash] = id
     }
-
+    // Hashing function to get the nameHash of the domain
 
     // EVENTS
     pub event DomainBioChanged(nameHash: String, bio: String)
@@ -353,6 +353,108 @@ pub contract Domains: NonFungibleToken{
         pub fun updateRentVault(vault: @FungibleToken.Vault)
         pub fun withdrawVault(receiver: Capability<&{FungibleToken.Receiver}>, amount: UFix64)
         pub fun setPrices(key: Int, val: UFix64)
+    }
+
+    //* REGISTRAR RESOURCE */
+    pub resource Registrar: RegistrarPublic, RegistrarPrivate{
+
+        // variables defined in the interfaces
+        pub let minRentDuration: UFix64
+        pub let maxDomainLength: Int
+        pub let prices: {Int: UFix64}
+
+        // refernce to the vault, for deposting the flow tokens we receive
+        // "priv" = private = "access(self)", cannot be defined in interfaces
+        priv var rentVault: @FungibleToken.Vault 
+        access(account) var domainsCollection: Capability<&Domains.Collection>
+
+        init(vault: @FungibleToken.Vault, collection: Capability<&Domains.Collection>){
+            self.minRentDuration = UFix64(365 * 24 * 60 * 60)
+            self.maxDomainLength = 30
+            self.prices = {}
+
+            self.rentVault <- vault
+            self.domainsCollection = collection
+        }
+
+        //* IMPLEMENTING THE METHODS OF INTERFACES */
+        pub fun renewDomain(domain: &Domains.NFT, duration: UFix64, feeTokens: @FungibleTokens.Vault){
+
+            var len = domain.name.length
+            if len > 10{
+                len = 10
+            }
+
+            let price = self.getPrices()[len]
+            // check if the minRentDuration period is over
+            if duration < self.minRentDuration {
+                panic("Domain must be registred for the min. presribed time!: ".concat(self.minRentDuration.toString()))
+            }
+            // check if the user has set the price for the given length of the domain
+            if(price == 0.0 || price == nil){
+                panic("Price has not been set for this domain length")
+            }
+            // calculate the total rental cost
+            let rentCost = price! * duration
+            // check the vault balance the user has sent us
+            let feeSent = feeTokens.balance
+
+            // ensure they have sent enough tokens
+            if feeSent < rentCost{
+                panic("You do not have enough FLOW tokens as expected: ".concat(rentCost.toString()))
+
+            }
+            // if enough tokens then deposit them to our vault
+            self.rentVault.deposit(from: <-feeTokens)
+            // Calculate the new expiration date and set it
+            let newExpTime = Domains.getExpirationTime(nameHash: domain.nameHash)! + duration
+            Domains.updateExpirationTime(nameHash: domain.nameHash, expTime: newExpTime)
+
+            // emit the domainRenewed event
+            emit DomainRenewed(id: domain.id, name: domain.name, nameHash: domain.nameHash, expiresAt: newExpTime, receiver: domain.owner!.address)
+        } 
+
+        pub fun registerDomain(name:String, duration: UFix64, feeTokens: @FungibleToken.Vault, receiver: Capability<&{NonFungibleToken.Receiver}>){
+            // make sure the domain name is not longer than presribed
+            pre{
+                name.length <= self.maxDomainLength : "Domain name is too long!"
+            }
+
+            // hash the name and obtain the namehash
+            let nameHash = Domains.getDomainHash(name: name)
+
+            // ensure the domain is available for sale
+            if Domains.isAvailable(nameHash: nameHash) == false{
+                panic("Domain no available")
+            }
+            // price the domain based on the name length
+            var len = name.length
+            if len > 10{
+                len = 10
+            }
+            // get the price of the domain based on the length
+            let price = self.getPrices()[len]
+
+            if duration < self.minRentDuration{
+                panic("Domain must be registered for atleast the minimum duration ".concat(self.minRentDuration.toString()))
+            }
+
+            if price == 0.0 || price == nil{
+                panic("Price has not been set for the domain")
+            }
+
+            let rentCost = price! * duration
+            let feeSent = feeTokens.balance
+            if feeSent < rentCost{
+                panic("You do not have enough FLOW tokens as expected: ".concat(rentCost.toString()))
+            }
+
+            self.rentVault.deposit(from: <- feeTokens)
+            // set the expiration time
+            let expirationTime = getCurrentBlock().timestamp + duration
+            // mint the new domain and transfer it to the receiver
+            self.domainsCollection.borrow()!.mintDomain(name: name, nameHash: nameHash, expiresAt: expirationTime, receiver: receiver)
+        }
     }
 
 }   
