@@ -22,6 +22,15 @@ pub contract Domains: NonFungibleToken{
     pub let minRentDuration: UFix64
     // define the maximum length of the domain name 
     pub let maxDomainLength: Int
+    // Storage, public, private paths for Domains.Collection resource
+    pub let DomainsStoragePath: StoragePath
+    pub let DomainsPublicPath : PublicPath
+    pub let DomainsPrivatePath: PrivatePath
+
+    // Storage, public, private paths for Domains.Registrar Resource
+    pub let RegistrarStoragePath: StoragePath
+    pub let RegistrarPrivatePath: PrivatePath
+    pub let RegistrarPublicPath: PublicPath
 
     // GLOBAL FUNCTIONS
     // HELPER functions
@@ -78,14 +87,114 @@ pub contract Domains: NonFungibleToken{
         self.nameHashToIDs[namehash] = id
     }
     // Hashing function to get the nameHash of the domain
+    pub fun getDomainNameHash(name: String): String{
+        let forbiddenCharsUTF8 = self.forbiddenChars.utf8
+        let nameUTF8 = name.utf8
+
+        for char in forbiddenCharsUTF8{
+            if nameUTF8.contains(char){
+                panic("Illegal domain name!")
+            }
+        }
+
+        // calculate hash via the SHA-256 algo and encode it as a Hexadecimal string
+        let nameHash = String.encodeHex(HashAlgorithm.SHA3_256.hash(nameUTF8))
+        return nameHash
+
+        
+    }
+
+    // create an empty collection
+    pub fun createEmptyCollection(): @NonfungibleToken.Collection{
+        let collection <- create Collection()
+        return <- collection
+    }
+
+    // return the cost of the domain
+    pub fun getRentCost(name: String, duration : UFix64): UFix64{
+        var len = name.length
+        if len > 10 {
+            len = 10
+        }
+
+        let price = self.getPrices()[len]
+        let rentCost  = price*duration
+        return rentCost
+    }
 
     // EVENTS
     pub event DomainBioChanged(nameHash: String, bio: String)
     pub event DomainAddressChanged(nameHash: String, address: Address)
     pub event DomainMinted(id: UInt64, name: String, nameHash: String, expiresAt: UFix64, receiver: Address)
     pub event DomainRenewed(id: UInt64, name: String, nameHash: String, expiresAt: UFix64, receiver: Address)
-
+    // An event which will be emitted when contract gets initialized(Required bt Nonfungible token standard)
+    pub event ContractInitialized()
     // BEGIN:
+
+    // initialzer
+    init(){
+        // initialize values for dictionaries
+        self.owners = {}
+        self.expirationTimes = {}
+        self.nameHashToIDs = {}
+
+        // define some forbidden characters for domain name
+        self.forbiddenChars = "!@#$%^&*()<>? ./"
+        // total supply to be zero
+        self.totalSupply = 0
+
+        // set the various paths for Domains.collection
+        self.DomainsStoragePath = StoragePath(identifier: "flowNameServiceDomains") ?? 
+        panic("Could not get the storage path")
+        self.DomainsPrivatePath = PrivatePath(identifier: "flowNameServiceDomains") ?? 
+        panic("Could not get the storage path")
+        self.DomainsPublicPath = PublicPath(identifier: "flowNameServiceDomains") ?? 
+        panic("Could not get the storage path")
+
+        // set the various paths for Domains.Registrar
+        self.RegistrarStoragePath = StoragePath(identifier: "flowNameServiceRegistrar") ?? 
+        panic("Could not get the storage path")
+        self.RegistrarPublicPath = PublicPath(identifier: "flowNameServiceRegistrar") ?? 
+        panic("Could not get the storage path")
+        self.RegistrarPrivatePath = PrivatePath(identifier: "flowNameServiceRegistrar") ?? 
+        panic("Could not get the storage path")
+
+        // save the Domains.Collection resource to admin's account storage
+        self.account.save(<- self.createEmptyCollection(), to: Domains.DomainsStoragePath)
+
+        // link the public resource interfaces that we are okay sharing with the third party, to the public account storage
+        // ...to make it accessible by anyone
+        self.account.link<&Domains.Collection{NonFungibleToken.CollectionPublic, NonFungibleToken.Receiver, Domains.CollectionPublic}>(self.DomainsPublicPath, target:
+        self.DomainsStoragePath)
+
+        // link the overall resource(public + private) to the private storage path from main storage path
+        // ... Allows us to create capabilites if necessary. capabilites can only be created from public or private paths
+        // ... and not from storage paths for security reasons
+        self.account.link<&Domains.Collection>(self.DomainsPrivatePath, target: 
+        self.DomainsStoragePath)
+
+        // get a capabilty from private path, so we can pass this one onto Registrar resource, ao it has access to mintDomain() fxn
+        let collectionCapability = self.account.getCapability<&Domains.Collection>(self.DomainsPrivatePath)
+
+        // create an empty vault for flow tokens
+        let vault <- FlowToken.createEmptyVault()
+
+        // create the registrar resource and give it the vault and private collection capabilty
+        let registrar <- create Registrar(vault: <- vault, collection: collectionCapability)
+
+        // save the resource in the admins main storage path
+        self.account.save(<-registrar, to: self.RegistrarStoragePath)
+
+        // link the public portion of the registrar to the public path for the registrar resource
+        self.account.link<&Domains.Registrar{Domains.RegistrarPublic}>(self.RegistrarPublicPath, target: self.RegistrarStoragePath)
+
+        // link the overall resource(public + private) to the private path for the registrar resource
+        self.account.link<&Domains.Registrar>(self.RegistrarPrivatePath, target: self.RegistrarStoragePath)
+
+        // emit the contract initialized event
+        emit ContractInitialized()
+    }
+
 
     // struct to represent information about the FNS Domain
     pub struct DomainInfo{
@@ -454,6 +563,46 @@ pub contract Domains: NonFungibleToken{
             let expirationTime = getCurrentBlock().timestamp + duration
             // mint the new domain and transfer it to the receiver
             self.domainsCollection.borrow()!.mintDomain(name: name, nameHash: nameHash, expiresAt: expirationTime, receiver: receiver)
+        }
+
+        // returns the price dictionary
+        pub fun getPrice(): {Int: UFix64}{
+            return self.prices
+        }
+
+        // returns the balance of our rentVault
+        pub fun getVaultBalance(): UFix64{
+            return self.rentVault.balance
+        }
+
+        // update the vault to point to another vault
+        pub fun updateRentVault(vault: @FungibleToken.Vault){
+
+            // make sure to withdraw tokens before shifting vaults
+            pre{
+                self.rentVault.balance == 0.0 : "Withdraw balace from old wallet before updating"
+            }
+
+            // simultaneously move the resource
+            let oldVault <- self.rentVault <- vault
+            // destroy the old resource
+            destroy oldVault
+        }
+
+        // move tokens from our vault to fungibleToken.Receiver
+        pub fun withdrawVault(receiver: Capability<&{FungibleToken.Receiver}>, amount: UFix64){
+            let vault = receiver.borrow()!
+            vault.deposit(from : self.rentVault.withdraw(amount: amount))
+        }
+
+        // update the prices of domain for a given length
+        pub fun setPrices(key: Int, val: UFix64){
+            self.prices[key] = val
+        }
+
+        // since the registar resource has other resources we have to destroy it
+        destroy(){
+            destroy self.rentVault
         }
     }
 
