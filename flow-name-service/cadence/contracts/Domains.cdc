@@ -122,6 +122,39 @@ pub contract Domains: NonFungibleToken{
         return rentCost
     }
 
+    pub fun getVaultBalance(): UFix64 {
+        /*
+            @dev CAPABILITIES (.getCapabilites()) are used to grant access to resource outside the calling account's scope
+            The capability refers to a Domains.Registrar resource with the access type Domains.RegistrarPublic and uses the ... 
+            ... Domains.RegistrarPublicPath to identify its public interface. 
+         
+            <&Domains.Registrar{Domains.RegistrarPublic}>: This part specifies the type of capability being retrieved. 
+            In this case, it's a reference to the Domains.Registrar resource with the access type Domains.RegistrarPublic
+         */
+        let cap = self.account.getCapability<&Domains.Registrar{Domains.RegistrarPublic}>
+        (Domains.RegistrarPublicPath) 
+
+        let registrar = cap.borrow() ?? panic("Could not borrow registrar public")
+        return registrar.getVaultBalance()
+    }
+
+    pub fun registerDomain(name: String, duration: UFix64, feeTokens: @FungibleToken.Vault, receiver: Capability<&{NonFungibleToken.Receiver}>){
+        let cap = self.account.getCapability<&Domains.Registrar{Domains.RegistrarPublic}>
+        (self.RegistrarPublicPath)
+
+        let registrar = cap.borrow() ?? panic("Could not borrow registrar")
+        registrar.registerDomain(name: name, duration: duration, feeTokens: <- feeTokens, receiver: receiver)
+
+    }
+
+    pub fun renewDomain(domain: &Domains.NFT, duration: UFix64, feeTokens: @FungibleToken.Vault){
+        let cap = self.account.getCapability<&Domains.Registrar{Domains.RegistrarPublic}>
+        (self.RegistrarPublicPath)
+
+        let registrar = cap.borrow() ?? panic("Could not borrow registrar")
+        registrar.renewDomain(domain: domain, duration: duration, feeTokens: <- feeTokens)
+    }
+
     // EVENTS
     pub event DomainBioChanged(nameHash: String, bio: String)
     pub event DomainAddressChanged(nameHash: String, address: Address)
